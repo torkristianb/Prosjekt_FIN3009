@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import time as time
 
 
 def finn_daglig_gjennomsnitt_r(kolonne_fond):
@@ -20,11 +21,15 @@ def finn_varians(kolonne_fond,rbar):
     var=varteller1/(len(varteller)-1)
     return var
 
-def beta(kolonne_fond,kolonne_marked):
-    liste_marked=[]
-    liste_portefolje=[]
-
-
+def beta_funk(rbarp,rbarm,kolonne_fond,Marked,var):
+    teller_liste=[]
+    for i in range(len(Marked)-1):
+        teller=(np.log(kolonne_fond[i+1]/kolonne_fond[i])-rbarp)*(np.log(Marked[i+1]/Marked[i])-rbarm)
+        teller_liste.append(teller)
+    teller=sum(teller_liste)
+    cov=teller/(len(Marked)-1)
+    beta=cov/var
+    return beta
 
 def jensens_alpha(rp,rm,beta):
     rf=0.03
@@ -37,7 +42,7 @@ def jensens_alpha(rp,rm,beta):
 def sharp_ratio(rp,rm,varp,varm):
     rf=0.03
     sharp_p=(rp-rf)/np.sqrt(varp)
-    sharp_m=(rm-rf)/np.sqrt(varp)
+    sharp_m=(rm-rf)/np.sqrt(varm)
     return sharp_p,sharp_m
 
 
@@ -56,31 +61,41 @@ def M_square(rp,varp,varm,rm):
 
 
 Nordea_stabil_avskastning = r"C:\Users\Eier\OneDrive\Eldig sem. 5\FIN3009\Project_1\Prosjekt_FIN3009\Nordea_stabil_avkastning.csv"
-Marked = r"C:\Users\Eier\OneDrive\Eldig sem. 5\FIN3009\Project_1\Prosjekt_FIN3009\Nordea_stabil_avkastning.csv"
-df = pd.read_csv(Marked)
-df = pd.read_csv(Nordea_stabil_avskastning)
-kolonne_fond = df['Close'].dropna().tolist()
-marked = df['Close'].dropna().tolist()
+Marked = r"C:\Users\Eier\OneDrive\Eldig sem. 5\FIN3009\Project_1\Prosjekt_FIN3009\gspc_download.csv"
+dfm = pd.read_csv(Marked)
+dfp = pd.read_csv(Nordea_stabil_avskastning)
+dfp['Close'] = dfp['Close'].fillna(method='ffill')
+kolonne_fond = dfp['Close'].tolist()
+Marked = dfm['Close'].dropna().tolist()
+
+
+Marked = Marked[1:]
+Marked = [float(x) for x in Marked]
 rbarp=finn_daglig_gjennomsnitt_r(kolonne_fond)
 varp=finn_varians(kolonne_fond,rbarp)
-rp=rbarp*100*574
+rp=np.log(kolonne_fond[-1]/kolonne_fond[0])
 rbarm=finn_daglig_gjennomsnitt_r(Marked)
 varm=finn_varians(Marked,rbarm)
-rm=rbarm*100*574
-
-
+rm=np.log(Marked[-1]/Marked[0])
+beta=beta_funk(rbarp,rbarm,kolonne_fond,Marked,varm)
 
 print("Daglig")
-print("glidene logaritmisk gjennomsnitt:", rbar*100,"%")
+print("glidene logaritmisk gjennomsnitt:", rbarp*100,"%")
 print("Standardavviket:",np.sqrt(varp)*100,"%")
 print("")
-print("Årlig")
-print("Logaritmisk avkastning:", rbar*100*574,"%")
-print("Aretmetisk avkastning:" ,(kolonne_fond[574]-kolonne_fond[0])/(kolonne_fond[0])*100,"%")
-print("Standardavviket:",np.sqrt(varp)*100*np.sqrt(574))
-
-
+print("Årlig Nordea")
+print("Logaritmisk avkastning:", rp*100,"%")
+print("Aretmetisk avkastning:" ,(kolonne_fond[-1]-kolonne_fond[0])/(kolonne_fond[0])*100,"%")
+print("Standardavviket:",np.sqrt(varp)*100*np.sqrt(len(kolonne_fond)))
+print("Årlig marked")
+print("Logaritmisk avkastning:", rm*100,"%")
+print("Aretmetisk avkastning:" ,(Marked[-1]-Marked[0])/(Marked[0])*100,"%")
+print("Standardavviket:",np.sqrt(varm)*100*np.sqrt(len(Marked)))
+print("beta:",beta)     
+print("jensen's alpha:", jensens_alpha(rp,rm,beta))
+print("Sharp ratio Norde, marked:", sharp_ratio(rp,rm,varp,varm))
+print("treynor ratio nordea:", Treynor_ratio(rp,beta))
+print("M_square:", M_square(rp,varp,varm,rm))
         
 
-        
 
