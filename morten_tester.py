@@ -1,113 +1,143 @@
 from pathlib import Path
-import pandas as pd
 import numpy as np
+import pandas as pd
 import statsmodels.api as sm
 import yfinance as yf
-import matplotlib.pyplot as plt
 
-# --- FILBANE TIL FONDET (relativ til skriptet) ---
+
+# ------------------------------
+# Konfig
+# ------------------------------
+TICKER = "^GSPC"   # Benchmark (S&P 500). Bytt til ^W1DOW/URTH/OSEBX hvis ønskelig
+RF_ANNUAL = 0.03   # 3% årlig risikofri rente (justér om du vil)
+
+
+# ------------------------------
+# 1) Les fondet og lag avkastning
+# ------------------------------
 repo_root = Path(__file__).resolve().parent
-fund_file = repo_root / "Nordea_stabil_avkastning.csv"
+fund_path = repo_root / "Nordea_stabil_avkastning.csv"
+fund = pd.read_csv(fund_path)
 
-# --- LES CSV ---
-fund_data = pd.read_csv(fund_file)
-
-# --- AUTOMATISK FINN KOLONNER ---
-date_col = next((c for c in fund_data.columns if 'date' in c.lower() or 'dato' in c.lower()), None)
-price_col = next((c for c in fund_data.columns if 'adj' in c.lower() and 'close' in c.lower()), None)
+# Finn kolonner robust
+date_col = next(c for c in fund.columns if "date" in c.lower() or "dato" in c.lower())
+price_col = next((c for c in fund.columns if "adj" in c.lower() and "close" in c.lower()), None)
 if price_col is None:
-    price_col = next((c for c in fund_data.columns if 'close' in c.lower() or 'pris' in c.lower() or 'kurs' in c.lower()), None)
-if date_col is None or price_col is None:
-    raise ValueError(f"Fant ikke dato/pris-kolonner i fond-data. Kolonner: {list(fund_data.columns)}")
+    price_col = next(c for c in fund.columns if "close" in c.lower() or "pris" in c.lower() or "kurs" in c.lower())
 
-# --- KONVERTER DATO & sorter ---
-fund_data[date_col] = pd.to_datetime(fund_data[date_col], errors="coerce")
-fund_data = fund_data.dropna(subset=[date_col, price_col]).sort_values(date_col)
+# Rens og sorter
+fund[date_col] = pd.to_datetime(fund[date_col], errors="coerce")
+fund = fund.dropna(subset=[date_col, price_col]).sort_values(date_col)
+fund = fund.rename(columns={date_col: "Date"})
+fund["Fund_Return"] = fund[price_col].astype(float).pct_change()
+fund = fund.dropna(subset=["Fund_Return"])
 
-# --- HENT BENCHMARK FRA YAHOO FINANCE ---
-benchmark_ticker = "^GSPC"  # S&P 500
-market_data = yf.download(
-    benchmark_ticker,
-    start=fund_data[date_col].min(),
-    end=fund_data[date_col].max() + pd.Timedelta(days=1),  # yfinance end er eksklusiv
-    auto_adjust=False,
-    progress=False
+if fund.empty:
+    raise ValueError("Fond-data ble tom etter rensing. Sjekk CSV-innholdet.")
+
+# Estimér frekvens: daglig hvis median mellom datoer <= 7 dager, ellers månedlig
+freq_days = np.median(np.diff(fund["Date"].values).astype("timedelta64[D]").astype(int))
+PER_YEAR = 252 if freq_days <= 7 else 12
+
+
+# ------------------------------
+# 2) Hent benchmark og lag avkastning
+# ------------------------------
+mkt = yf.download(
+    TICKER,
+    start=fund["Date"].min(),
+    end=fund["Date"].max() + pd.Timedelta(days=1),  # yfinance end er eksklusiv
+    progress=False,
+    auto_adjust=True,  # gir 'Close' justert for utbytte/splitt
 )
 
-# --- Håndter MultiIndex/single index ---
-if isinstance(market_data.columns, pd.MultiIndex):
-    # ta ut nivå for tickeren hvis MultiIndex (felt, ticker)
-    market_data = market_data.xs(benchmark_ticker, axis=1, level=-1)
+# Håndter MultiIndex (kan være ('Close', '^GSPC'))
+if isinstance(mkt.columns, pd.MultiIndex):
+    mkt = mkt.xs(TICKER, axis=1, level=-1)
 
-market_data = market_data.reset_index()
+# Plukk robust pris-kolonne
+if "Close" in mkt.columns:
+    price_col_mkt = "Close"
+elif "Adj Close" in mkt.columns:
+    price_col_mkt = "Adj Close"
+else:
+    raise ValueError(f"Ingen 'Close' eller 'Adj Close' i market data. Kolonner: {mkt.columns.tolist()}")
 
-# --- Finn riktig pris-kolonne robust ---
-price_col_market = "Adj Close" if "Adj Close" in market_data.columns else ("Close" if "Close" in market_data.columns else None)
-if price_col_market is None:
-    raise ValueError(f"Ingen pris-kolonne funnet i market_data. Kolonner: {list(market_data.columns)}")
+mkt = mkt[[price_col_mkt]].rename(columns={price_col_mkt: "Market"}).reset_index(names="Date")
 
-print(f"Bruker '{price_col_market}' som benchmark-pris-kolonne.")
+# Merge og lag markedsavkastning
+data = pd.merge(fund[["Date", "Fund_Return"]], mkt, on="Date", how="inner").sort_values("Date")
+data["Market_Return"] = data["Market"].astype(float).pct_change()
+data = data.dropna(subset=["Fund_Return", "Market_Return"])
 
-# --- SLÅ SAMMEN FOND OG BENCHMARK PÅ DATO ---
-left = fund_data[[date_col, price_col]].rename(columns={date_col: "Date", price_col: "Fund"})
-right = market_data[["Date", price_col_market]].rename(columns={price_col_market: "Market"})
-data = pd.merge(left, right, on="Date", how="inner").sort_values("Date")
+if data.empty:
+    raise ValueError("Ingen overlapp mellom fondet og benchmark på dato. Sjekk dato-intervaller.")
 
-# --- BEREGN DAGLIGE AVKASTNINGER (samme funksjonalitet) ---
-data['Fund_Return'] = data['Fund'].pct_change()
-data['Market_Return'] = data['Market'].pct_change()
-data = data.dropna()
 
-# --- RISIKOFRI RENTE (DAGLIG) ---
-risk_free_rate = 0.03 / 252  # 3% årlig delt på handelsdager
+# ------------------------------
+# 3) Basismetrikker (uavhengig av benchmark)
+# ------------------------------
+rf_per = RF_ANNUAL / PER_YEAR
 
-# --- BETA OG JENSEN'S ALPHA (samme modell som før) ---
-X = sm.add_constant(data['Market_Return'])
-model = sm.OLS(data['Fund_Return'], X).fit()
-alpha = model.params['const']
-beta = model.params['Market_Return']
+ann_mean = data["Fund_Return"].mean() * PER_YEAR
+ann_vol  = data["Fund_Return"].std(ddof=1) * np.sqrt(PER_YEAR)
+sharpe   = ((data["Fund_Return"] - rf_per).mean() / data["Fund_Return"].std(ddof=1)) * np.sqrt(PER_YEAR)
 
-# --- SHARPE RATIO ---
-excess_returns = data['Fund_Return'] - risk_free_rate
-sharpe_ratio = excess_returns.mean() / (excess_returns.std() + 1e-12) * np.sqrt(252)
 
-# --- TREYNOR RATIO ---
-treynor_ratio = (data['Fund_Return'].mean() - risk_free_rate) / (beta + 1e-12) * 252
+# ------------------------------
+# 4) CAPM på overskuddsavkastning (excess returns)
+#     (r_p - r_f) = alpha + beta (r_m - r_f) + eps
+# ------------------------------
+y = data["Fund_Return"] - rf_per
+x = data["Market_Return"] - rf_per
+X = sm.add_constant(x)
+capm = sm.OLS(y, X).fit()
+alpha_daily = capm.params["const"]
+beta = capm.params["Market_Return"]
+sigma_e_daily = capm.resid.std(ddof=1)
 
-# --- INFORMATION RATIO ---
-active_return = data['Fund_Return'] - data['Market_Return']
-information_ratio = active_return.mean() / (active_return.std() + 1e-12) * np.sqrt(252)
+alpha_annual = alpha_daily * PER_YEAR
+sigma_e_annual = sigma_e_daily * np.sqrt(PER_YEAR)
 
-# --- M^2 (beholder samme uttrykk som dere brukte) ---
-M2 = risk_free_rate + (excess_returns.mean() / (excess_returns.std() + 1e-12)) * data['Market_Return'].std() * np.sqrt(252)
 
-# --- RESULTATER ---
-print(f"Jensen's alpha: {alpha*252:.4f}")
-print(f"Beta: {beta:.4f}")
-print(f"Sharpe ratio: {sharpe_ratio:.4f}")
-print(f"Treynor ratio: {treynor_ratio:.4f}")
-print(f"Information ratio: {information_ratio:.4f}")
-print(f"M^2: {M2:.4f}")
+# ------------------------------
+# 5) Ytelsesmål
+# ------------------------------
+# Treynor: årlig overskuddsavkastning per beta
+EPS = 1e-12
+treynor = (ann_mean - RF_ANNUAL) / (beta if abs(beta) > EPS else np.nan)
 
-# --- PLOT GLIDENDE AVKASTNING MED STANDARD ERROR ---
-window = 10
-data['Mean'] = data['Fund_Return'].rolling(window=window).mean()
-data['Std'] = data['Fund_Return'].rolling(window=window).std()
-data['SE'] = data['Std'] / np.sqrt(window)
+# Jensen's alpha (årlig)
+mean_mkt_annual = data["Market_Return"].mean() * PER_YEAR
+jensen = ann_mean - (RF_ANNUAL + beta * (mean_mkt_annual - RF_ANNUAL))
 
-plt.figure(figsize=(12,6))
-plt.plot(data["Date"], data['Mean'], label='Glidende gjennomsnitt')
-plt.fill_between(
-    data["Date"],
-    data['Mean'] - data['SE'],
-    data['Mean'] + data['SE'],
-    alpha=0.2,
-    label='± Standard Error'
-)
-plt.xlabel('Dato')
-plt.ylabel('Daglig avkastning')
-plt.title(f'Fondets avkastning med benchmark ({benchmark_ticker})')
-plt.legend()
-plt.grid(True)
-plt.tight_layout()
-plt.show()
+# Information Ratio (iht. forelesning): IR = alpha / sigma_e
+IR = alpha_annual / (sigma_e_annual if sigma_e_annual > EPS else np.nan)
+
+# M^2 = Rf + Sharpe * sigma_M (alle årlig)
+mkt_vol_annual = data["Market_Return"].std(ddof=1) * np.sqrt(PER_YEAR)
+M2 = RF_ANNUAL + sharpe * mkt_vol_annual
+
+
+# ------------------------------
+# 6) Utskrift (pent formatert)
+# ------------------------------
+start, end = data["Date"].min().date(), data["Date"].max().date()
+print("\n--- Datointervall og frekvens ---")
+print(f"Periode: {start} → {end}  | Observasjoner: {len(data)}  | PER_YEAR={PER_YEAR}")
+
+print("\n--- Grunnleggende ---")
+print(f"Årlig gj.snitt (aritmetisk):   {ann_mean: .3%}")
+print(f"Årlig volatilitet:             {ann_vol: .3%}")
+print(f"Sharpe (Rf={RF_ANNUAL:.1%}):   {sharpe: .3f}")
+
+print("\n--- CAPM ---")
+print(f"Beta:                          {beta: .4f}")
+print(f"Alpha (årlig):                 {alpha_annual: .3%}")
+print(f"Residual-vol (årlig):          {sigma_e_annual: .3%}")
+
+print("\n--- Ytelsesmål ---")
+print(f"Treynor:                       {treynor: .3f}")
+print(f"Jensen's alpha:                {jensen: .3%}")
+print(f"Information ratio:             {IR: .3f}")
+print(f"M^2:                           {M2: .3%}")
