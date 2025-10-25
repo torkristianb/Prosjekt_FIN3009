@@ -20,7 +20,8 @@ dfm['Date'] = pd.to_datetime(dfm['Date'], errors='coerce', format='%Y-%m-%d')
 # Slå sammen på felles datoer
 merged = pd.merge(dfm[['Date', 'Close']], dfp[['Date', 'Close']], on='Date', suffixes=('_m', '_p'))
 merged = merged.dropna()
-
+ 
+print(merged)
 # Beregn daglige log-avkastninger
 merged['r_m'] = np.log(merged['Close_m'] / merged['Close_m'].shift(1))
 merged['r_p'] = np.log(merged['Close_p'] / merged['Close_p'].shift(1))
@@ -29,7 +30,7 @@ merged = merged.dropna()
 # Parametre
 rf = 0.03  # Risikofri rente
 N = len(merged)
-trading_days = 600  # Antall handelsdager per år
+trading_days = 575  # Antall handelsdager per år
 
 # Daglig gjennomsnitt og varians
 rbar_p = merged['r_p'].mean()
