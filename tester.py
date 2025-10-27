@@ -5,7 +5,7 @@ import pandas as pd
 # --- 1) Hent GSPC fra Yahoo Finance ---
 mkt = yf.download(
     "^GSPC",
-    start="2022-07-03",      # fra dato
+    start="2022-03-07",      # fra dato
     end="2024-08-14",        # til dato
     auto_adjust=True,        # juster for utbytte/splitt
     progress=False
